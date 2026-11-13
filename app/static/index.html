@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQLite 复现库缩减服务</title>
+<style>
+  :root { --border: #d0d7de; --muted: #656d76; --bg: #f6f8fa; --blue: #0969da;
+          --green: #1a7f37; --red: #cf222e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC",
+         "Microsoft YaHei", sans-serif; color: #1f2328; background: var(--bg); }
+  header { background: #24292f; color: #fff; padding: 18px 28px; }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: #c9d1d9; font-size: 13px; }
+  main { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  .card { background: #fff; border: 1px solid var(--border); border-radius: 8px;
+          padding: 20px 24px; margin-bottom: 20px; }
+  .card h2 { margin: 0 0 12px; font-size: 16px; }
+  .constraints { font-size: 13px; color: var(--muted); }
+  .constraints ul { margin: 6px 0 0; padding-left: 20px; }
+  label { display: block; font-weight: 600; margin: 14px 0 4px; }
+  input[type=file], textarea, select { width: 100%; font: inherit; }
+  textarea { min-height: 150px; font-family: ui-monospace, SFMono-Regular,
+             Menlo, Consolas, monospace; font-size: 13px; padding: 10px;
+             border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
+  button { background: var(--blue); color: #fff; border: 0; border-radius: 6px;
+           padding: 9px 22px; font-size: 14px; cursor: pointer; margin-top: 16px; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.secondary { background: #f0f3f6; color: #1f2328; border: 1px solid var(--border); }
+  .samples button { margin-right: 8px; }
+  .status { display: none; }
+  .status.active { display: block; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px;
+          font-size: 12px; font-weight: 600; }
+  .pill.running { background: #ddf4ff; color: var(--blue); }
+  .pill.done { background: #dafbe1; color: var(--green); }
+  .pill.error { background: #ffebe9; color: var(--red); }
+  table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  th { background: var(--bg); }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+        padding: 10px; overflow: auto; font-size: 12px; max-height: 320px; }
+  .err { color: var(--red); font-weight: 600; white-space: pre-wrap; }
+  .ok-msg { color: var(--green); font-weight: 600; }
+  a.dl { display: inline-block; margin-top: 12px; background: var(--green);
+         color: #fff; text-decoration: none; padding: 9px 22px; border-radius: 6px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SQLite 复现库缩减服务</h1>
+  <p>上传结构受限的 SQLite 库与确定性 SQL 脚本，确认原始错误后自动删除数据行，
+     生成“再删任一行及其外键闭包就无法复现”的最小复现库。</p>
+</header>
+<main>
+  <section class="card constraints">
+    <h2>输入约束</h2>
+    <ul>
+      <li>至多 <b>3 张普通表</b>，无触发器、无视图、无虚拟表；全部表共至多 <b>60 行</b>。</li>
+      <li>主键与外键均为 <b>单列 INTEGER</b>，外键必须引用目标表主键，允许循环引用。</li>
+      <li>上传库现有数据必须已满足外键约束；脚本不得访问外部文件（ATTACH/PRAGMA/扩展等被拦截）。</li>
+      <li>复现判定：SQLite 扩展错误码 <b>与</b>完整错误文本完全一致；其它错误不算复现。</li>
+      <li>每次试跑使用独立副本，先 COMMIT 再失败也不会污染原件、后续试跑或下载库。</li>
+    </ul>
+  </section>
+
+  <section class="card samples">
+    <h2>内置样例</h2>
+    <div id="sample-buttons"></div>
+    <div class="hint">点击“下载”可单独获取样例文件；点击“直接试跑”自动上传并执行。</div>
+  </section>
+
+  <section class="card">
+    <h2>上传并运行</h2>
+    <form id="job-form">
+      <label for="db">SQLite 数据库文件（.db）</label>
+      <input id="db" name="db" type="file" accept=".db,.sqlite,.sqlite3,application/x-sqlite3" required>
+      <label for="sql">SQL 脚本文件（可选，与下方文本框二选一）</label>
+      <input id="sql" name="sql" type="file" accept=".sql,text/plain">
+      <label for="script_text">或直接粘贴 SQL 脚本</label>
+      <textarea id="script_text" name="script_text"
+        placeholder="INSERT INTO ...;"></textarea>
+      <div><button id="submit-btn" type="submit">上传并开始缩减</button></div>
+    </form>
+  </section>
+
+  <section class="card status" id="job-panel">
+    <h2>任务 <span id="job-id" class="pill"></span>
+        <span id="job-status" class="pill"></span></h2>
+    <p id="job-message"></p>
+    <div id="job-detail"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pollTimer = null;
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function loadSamples() {
+  const r = await fetch('/api/samples');
+  const data = await r.json();
+  const box = $('sample-buttons');
+  for (const [key, info] of Object.entries(data)) {
+    box.insertAdjacentHTML('beforeend',
+      `<div style="margin:8px 0"><b>${esc(info.title)}</b><br>
+       <a class="dl" style="background:#57606a" href="${info.db_url}" download>下载样例库</a>
+       <a class="dl" style="background:#57606a" href="${info.sql_url}" download>下载样例脚本</a>
+       <button class="secondary" type="button" data-sample="${key}">直接试跑</button></div>`);
+  }
+  box.querySelectorAll('button[data-sample]').forEach((btn) =>
+    btn.addEventListener('click', () => runSample(btn.dataset.sample)));
+}
+
+async function runSample(key) {
+  const [dbResp, sqlResp] = await Promise.all([
+    fetch(`/static/sample_${key}.db`), fetch(`/static/sample_${key}.sql`)]);
+  const dbBlob = await dbResp.blob();
+  const sqlText = await sqlResp.text();
+  const form = new FormData();
+  form.append('db', new File([dbBlob], `sample_${key}.db`));
+  form.append('script_text', sqlText);
+  submitForm(form);
+}
+
+$('job-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const form = new FormData();
+  const db = $('db').files[0];
+  const sqlFile = $('sql').files[0];
+  const sqlText = $('script_text').value;
+  if (!db) { alert('请选择数据库文件'); return; }
+  if (!sqlFile && !sqlText.trim()) { alert('请上传或粘贴 SQL 脚本'); return; }
+  form.append('db', db);
+  if (sqlFile) form.append('sql', sqlFile);
+  form.append('script_text', sqlText);
+  submitForm(form);
+});
+
+async function submitForm(form) {
+  $('submit-btn').disabled = true;
+  showPanel();
+  setStatus('running', '已上传，等待处理…');
+  $('job-detail').innerHTML = '';
+  try {
+    const r = await fetch('/api/jobs', { method: 'POST', body: form });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    $('job-id').textContent = data.id.slice(0, 8);
+    pollJob(data.id);
+  } catch (err) {
+    setStatus('error', '');
+    $('job-message').innerHTML = `<span class="err">${esc(err.message)}</span>`;
+    $('submit-btn').disabled = false;
+  }
+}
+
+function showPanel() { $('job-panel').classList.add('active'); }
+function setStatus(status, message) {
+  const el = $('job-status');
+  el.className = `pill ${status}`;
+  el.textContent = { queued: '排队中', running: '运行中', done: '完成',
+                     error: '失败' }[status] || status;
+  if (message) $('job-message').textContent = message;
+}
+
+function pollJob(id) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/jobs/${id}`);
+      const job = await r.json();
+      if (!r.ok) throw new Error(job.detail || `HTTP ${r.status}`);
+      setStatus(job.status, job.message);
+      if (job.status === 'done') { finish(id, job); clearInterval(pollTimer); }
+      if (job.status === 'error') {
+        $('job-message').innerHTML = `<span class="err">${esc(job.message)}</span>`;
+        clearInterval(pollTimer);
+        $('submit-btn').disabled = false;
+      }
+    } catch (err) {
+      clearInterval(pollTimer);
+      setStatus('error', '');
+      $('job-message').innerHTML = `<span class="err">${esc(err.message)}</span>`;
+      $('submit-btn').disabled = false;
+    }
+  }, 1000);
+}
+
+function errorBlock(title, e) {
+  if (!e) return '';
+  return `<tr><th>${title}</th><td><code>${esc(e.error_name || '')}
+    (${e.error_code ?? ''})</code><br><span class="err">${esc(e.error_message || '')}</span></td></tr>`;
+}
+
+function finish(id, job) {
+  $('submit-btn').disabled = false;
+  let html = '';
+  if (job.kind === 'success_no_reduction') {
+    html += '<p class="ok-msg">原脚本执行成功，未产生 SQLite 错误，无需缩减。</p>';
+  }
+  if (job.baseline) {
+    html += '<table><tr><th style="width:130px">原始错误</th><td><code>' +
+      esc(job.baseline.error_name || '执行成功') + '</code>' +
+      (job.baseline.error_message ? `<br><span class="err">${esc(job.baseline.error_message)}</span>` : '') +
+      '</td></tr>';
+    if (job.final) html += errorBlock('缩减后错误', job.final);
+    html += '</table>';
+  }
+  if (job.row_counts_before) {
+    html += '<table><tr><th>表</th><th>原始行数</th><th>缩减后行数</th></tr>';
+    for (const t of job.tables) {
+      html += `<tr><td>${esc(t)}</td><td>${job.row_counts_before[t] ?? 0}</td>
+               <td>${job.row_counts_after[t] ?? 0}</td></tr>`;
+    }
+    html += '</table>';
+  }
+  if (typeof job.trials === 'number') {
+    html += `<p class="hint">试跑次数：${job.trials}；采纳的缩减步骤：${job.accepted_steps ?? 0}</p>`;
+  }
+  if (job.kept_rows && job.kept_rows.length) {
+    html += '<details><summary>保留的行（表 / 主键）</summary><table><tr><th>表</th><th>主键</th></tr>';
+    for (const row of job.kept_rows) {
+      html += `<tr><td>${esc(row.table)}</td><td>${esc(row.pk)}</td></tr>`;
+    }
+    html += '</table></details>';
+  }
+  if (job.log && job.log.length) {
+    html += `<details><summary>缩减日志（${job.log.length} 条）</summary>
+             <pre>${esc(job.log.join('\n'))}</pre></details>`;
+  }
+  if (job.download_available) {
+    html += `<a class="dl" href="/api/jobs/${id}/download">下载复现库 repro.db</a>`;
+  }
+  $('job-detail').innerHTML = html;
+}
+
+loadSamples();
+</script>
+</body>
+</html>

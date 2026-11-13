@@ -1,0 +1,14 @@
+# 构建上下文裁剪
+.venv/
+.bootstrap/
+.pytest_cache/
+.git/
+.gitignore
+data/
+tests/
+pytest.ini
+requirements-dev.txt
+**/__pycache__/
+*.pyc
+*.db-wal
+*.db-shm
